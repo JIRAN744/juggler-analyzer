@@ -1,17 +1,14 @@
 """
 🎰 ジャグラー ホール傾向分析ツール
+※ Selenium不要 — requests + BeautifulSoup のみ
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.stats import binom
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-import time, os
+import requests
+import time
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote
 import matplotlib
@@ -67,45 +64,37 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════
-# 機種スペック
+# 機種スペック (全8機種)
 # ═══════════════════════════════════════
 SPECS = {
-    # ── SアイムジャグラーEX ──
     "アイムジャグラー": {
         1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
         4:[259.0,315.1],5:[259.0,255.0],6:[255.0,255.0],
     },
-    # ── Sファンキージャグラー2 ──
     "ファンキージャグラー": {
         1:[268.6,439.8],2:[264.3,399.6],3:[260.1,331.0],
         4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
     },
-    # ── SマイジャグラーV (5) ──
     "マイジャグラー": {
         1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
         4:[259.0,315.1],5:[259.0,255.0],6:[240.9,204.8],
     },
-    # ── SハッピージャグラーVIII (V3) ──
     "ハッピージャグラー": {
         1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
         4:[259.0,315.1],5:[259.0,255.0],6:[240.9,240.9],
     },
-    # ── Sゴーゴージャグラー3 ──
     "ゴーゴージャグラー": {
         1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
         4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
     },
-    # ── SジャグラーガールズSS ──
     "ジャグラーガールズ": {
         1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
         4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
     },
-    # ── Sミスタージャグラー ──
     "ミスタージャグラー": {
         1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
         4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
     },
-    # ── Sウルトラミラクルジャグラー ──
     "ウルトラミラクル": {
         1:[267.5,425.6],2:[261.1,402.1],3:[256.0,350.5],
         4:[242.7,322.8],5:[233.2,297.9],6:[216.3,277.7],
@@ -142,51 +131,25 @@ def parse_input(text):
     return out
 
 # ═══════════════════════════════════════
-# Chromeドライバー
+# スクレイピング (requests版 — Chrome不要!)
 # ═══════════════════════════════════════
-def _driver():
-    opts = webdriver.ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-extensions")
-    opts.add_argument("--disable-software-rasterizer")
-    opts.add_argument("--blink-settings=imagesEnabled=false")
-    opts.add_argument("--window-size=1280,900")
-    opts.page_load_strategy = "eager"
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36"
+}
 
-    # Streamlit Cloud (Linux)
-    for b in ["/usr/bin/chromium","/usr/bin/chromium-browser","/usr/bin/google-chrome"]:
-        if os.path.exists(b):
-            opts.binary_location = b
-            break
-    for d in ["/usr/bin/chromedriver","/usr/lib/chromium-browser/chromedriver",
-              "/usr/lib/chromium/chromedriver"]:
-        if os.path.exists(d):
-            return webdriver.Chrome(service=Service(d), options=opts)
-
-    # Windows/Mac — Selenium自動検出
-    return webdriver.Chrome(options=opts)
-
-# ═══════════════════════════════════════
-# スクレイピング
-# ═══════════════════════════════════════
 def scrape(date_label, url):
     model = _model(url)
-    drv = None
     try:
-        drv = _driver()
-        drv.get(url)
-        WebDriverWait(drv, 15).until(
-            EC.presence_of_element_located((By.XPATH, "//table[contains(., 'BB')]")))
-        drv.execute_script("window.scrollTo(0,document.body.scrollHeight);")
-        time.sleep(1.5)
-        soup = BeautifulSoup(drv.page_source, "html.parser")
+        r = requests.get(url, headers=_HEADERS, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
 
         tbl = None
         for t in soup.find_all("table"):
-            if "BB" in t.text and "RB" in t.text:
+            txt = t.text
+            if "BB" in txt and "RB" in txt and "台番" in txt:
                 tbl = t; break
         if not tbl:
             return [], "テーブル未検出"
@@ -194,11 +157,10 @@ def scrape(date_label, url):
         rows = tbl.find_all("tr")
         hdr = [c.text.strip() for c in rows[0].find_all(["th","td"])]
 
-        # ヘッダーマッピング
         try:
             hm = {
-                "id":   next(i for i,s in enumerate(hdr) if "台番" in s or "台" in s),
-                "spin": next(i for i,s in enumerate(hdr) if "G数" in s or "ゲーム" in s),
+                "id":   next(i for i,s in enumerate(hdr) if "台番" in s),
+                "spin": next(i for i,s in enumerate(hdr) if "G数" in s),
                 "bb":   next(i for i,s in enumerate(hdr) if s == "BB"),
                 "rb":   next(i for i,s in enumerate(hdr) if s == "RB"),
             }
@@ -220,10 +182,10 @@ def scrape(date_label, url):
                 rb=int(cs[hm["rb"]]) if cs[hm["rb"]].isdigit() else 0,
             ))
         return data, None
+    except requests.RequestException as e:
+        return [], f"通信エラー: {e}"
     except Exception as e:
         return [], str(e)
-    finally:
-        if drv: drv.quit()
 
 # ═══════════════════════════════════════
 # 設定推定
