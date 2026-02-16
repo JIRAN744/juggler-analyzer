@@ -1,0 +1,470 @@
+"""
+🎰 ジャグラー ホール傾向分析ツール
+"""
+import streamlit as st
+import pandas as pd
+import numpy as np
+from scipy.stats import binom
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+import time, os
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+
+# ── 日本語フォント ──
+try:
+    import japanize_matplotlib
+except Exception:
+    import matplotlib.font_manager as fm
+    _jp = [f.name for f in fm.fontManager.ttflist
+           if any(k in f.name.lower() for k in
+                  ["gothic","meiryo","yu ","ipaex","noto sans cjk","hiragino"])]
+    if _jp:
+        plt.rcParams["font.family"] = _jp[0]
+    plt.rcParams["axes.unicode_minus"] = False
+
+warnings.filterwarnings("ignore")
+sns.set_palette("husl")
+
+# ═══════════════════════════════════════
+# ページ設定
+# ═══════════════════════════════════════
+st.set_page_config(
+    page_title="ジャグラー ホール傾向分析ツール",
+    page_icon="🎰",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+.hero{background:linear-gradient(135deg,#e74c3c 0%,#c0392b 50%,#8e44ad 100%);
+ padding:1.5rem 2rem;border-radius:14px;margin-bottom:1.5rem;text-align:center;
+ box-shadow:0 6px 24px rgba(231,76,60,.3)}
+.hero h1{color:#fff!important;font-size:2rem!important;margin:0!important;
+ text-shadow:0 2px 8px rgba(0,0,0,.3)}
+.hero p{color:rgba(255,255,255,.85)!important;margin:.4rem 0 0!important}
+.kpi{background:linear-gradient(135deg,#1a1d23,#2c3e50);
+ border:1px solid rgba(255,255,255,.08);border-radius:12px;
+ padding:1.1rem;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.2)}
+.kpi .n{font-size:2rem;font-weight:800;
+ background:linear-gradient(135deg,#e74c3c,#f39c12);
+ -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.kpi .l{color:#aaa;font-size:.85rem}
+.sec{border-left:4px solid #e74c3c;padding-left:12px;
+ margin:2rem 0 1rem;font-size:1.25rem;font-weight:700}
+@media(max-width:768px){.hero h1{font-size:1.3rem!important}.kpi .n{font-size:1.4rem}}
+</style>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════
+# 機種スペック
+# ═══════════════════════════════════════
+SPECS = {
+    # ── SアイムジャグラーEX ──
+    "アイムジャグラー": {
+        1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
+        4:[259.0,315.1],5:[259.0,255.0],6:[255.0,255.0],
+    },
+    # ── Sファンキージャグラー2 ──
+    "ファンキージャグラー": {
+        1:[268.6,439.8],2:[264.3,399.6],3:[260.1,331.0],
+        4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
+    },
+    # ── SマイジャグラーV (5) ──
+    "マイジャグラー": {
+        1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
+        4:[259.0,315.1],5:[259.0,255.0],6:[240.9,204.8],
+    },
+    # ── SハッピージャグラーVIII (V3) ──
+    "ハッピージャグラー": {
+        1:[273.1,439.8],2:[269.7,399.6],3:[269.7,331.0],
+        4:[259.0,315.1],5:[259.0,255.0],6:[240.9,240.9],
+    },
+    # ── Sゴーゴージャグラー3 ──
+    "ゴーゴージャグラー": {
+        1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
+        4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
+    },
+    # ── SジャグラーガールズSS ──
+    "ジャグラーガールズ": {
+        1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
+        4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
+    },
+    # ── Sミスタージャグラー ──
+    "ミスタージャグラー": {
+        1:[268.6,374.5],2:[267.5,354.2],3:[260.1,331.0],
+        4:[249.2,291.3],5:[240.9,257.0],6:[237.4,237.4],
+    },
+    # ── Sウルトラミラクルジャグラー ──
+    "ウルトラミラクル": {
+        1:[267.5,425.6],2:[261.1,402.1],3:[256.0,350.5],
+        4:[242.7,322.8],5:[233.2,297.9],6:[216.3,277.7],
+    },
+}
+_DEF = SPECS["マイジャグラー"]
+
+def _probs(model, s):
+    spec = _DEF
+    for k in SPECS:
+        if k in model: spec = SPECS[k]; break
+    d = spec.get(s, spec[1])
+    return 1/d[0], 1/d[1]
+
+def _model(url):
+    try:
+        qs = parse_qs(urlparse(url).query)
+        if "kishu" in qs: return unquote(qs["kishu"][0])
+    except Exception: pass
+    return "マイジャグラーV"
+
+# ═══════════════════════════════════════
+# 入力パーサー
+# ═══════════════════════════════════════
+def parse_input(text):
+    text = text.strip().strip('"').strip("'")
+    out = []
+    for ln in text.split("\n"):
+        ln = ln.strip().strip('"').strip("'")
+        if not ln or ln.startswith("#"): continue
+        parts = ln.split(",", 1)
+        if len(parts) == 2 and parts[1].strip():
+            out.append((parts[0].strip(), parts[1].strip()))
+    return out
+
+# ═══════════════════════════════════════
+# Chromeドライバー
+# ═══════════════════════════════════════
+def _driver():
+    opts = webdriver.ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-extensions")
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--blink-settings=imagesEnabled=false")
+    opts.add_argument("--window-size=1280,900")
+    opts.page_load_strategy = "eager"
+
+    # Streamlit Cloud (Linux)
+    for b in ["/usr/bin/chromium","/usr/bin/chromium-browser","/usr/bin/google-chrome"]:
+        if os.path.exists(b):
+            opts.binary_location = b
+            break
+    for d in ["/usr/bin/chromedriver","/usr/lib/chromium-browser/chromedriver",
+              "/usr/lib/chromium/chromedriver"]:
+        if os.path.exists(d):
+            return webdriver.Chrome(service=Service(d), options=opts)
+
+    # Windows/Mac — Selenium自動検出
+    return webdriver.Chrome(options=opts)
+
+# ═══════════════════════════════════════
+# スクレイピング
+# ═══════════════════════════════════════
+def scrape(date_label, url):
+    model = _model(url)
+    drv = None
+    try:
+        drv = _driver()
+        drv.get(url)
+        WebDriverWait(drv, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//table[contains(., 'BB')]")))
+        drv.execute_script("window.scrollTo(0,document.body.scrollHeight);")
+        time.sleep(1.5)
+        soup = BeautifulSoup(drv.page_source, "html.parser")
+
+        tbl = None
+        for t in soup.find_all("table"):
+            if "BB" in t.text and "RB" in t.text:
+                tbl = t; break
+        if not tbl:
+            return [], "テーブル未検出"
+
+        rows = tbl.find_all("tr")
+        hdr = [c.text.strip() for c in rows[0].find_all(["th","td"])]
+
+        # ヘッダーマッピング
+        try:
+            hm = {
+                "id":   next(i for i,s in enumerate(hdr) if "台番" in s or "台" in s),
+                "spin": next(i for i,s in enumerate(hdr) if "G数" in s or "ゲーム" in s),
+                "bb":   next(i for i,s in enumerate(hdr) if s == "BB"),
+                "rb":   next(i for i,s in enumerate(hdr) if s == "RB"),
+            }
+        except StopIteration:
+            return [], f"カラム未検出 (ヘッダー: {hdr})"
+
+        data = []
+        for row in rows[1:]:
+            cs = [c.text.strip().replace(",","") for c in row.find_all(["th","td"])]
+            if len(cs) <= max(hm.values()): continue
+            sp = cs[hm["spin"]]
+            if not sp.isdigit(): continue
+            spin = int(sp)
+            if spin == 0: continue
+            data.append(dict(
+                date=date_label, machine_id=cs[hm["id"]], model=model,
+                spin=spin,
+                bb=int(cs[hm["bb"]]) if cs[hm["bb"]].isdigit() else 0,
+                rb=int(cs[hm["rb"]]) if cs[hm["rb"]].isdigit() else 0,
+            ))
+        return data, None
+    except Exception as e:
+        return [], str(e)
+    finally:
+        if drv: drv.quit()
+
+# ═══════════════════════════════════════
+# 設定推定
+# ═══════════════════════════════════════
+def estimate(data):
+    for item in data:
+        total, likes = 0, {}
+        for s in range(1, 7):
+            pb, pr = _probs(item["model"], s)
+            lk = binom.pmf(item["bb"], item["spin"], pb) \
+               * binom.pmf(item["rb"], item["spin"], pr)
+            likes[s] = lk; total += lk
+        for s in range(1, 7):
+            item[f"p{s}"] = likes[s]/total if total > 0 else 0
+        item["hi"] = item["p5"] + item["p6"]
+        item["est"] = max(range(1, 7), key=lambda s: item[f"p{s}"])
+    return data
+
+# ═══════════════════════════════════════
+# グラフ
+# ═══════════════════════════════════════
+def fig_matsubi(df):
+    st.markdown('<div class="sec">📍 末尾分析</div>', unsafe_allow_html=True)
+    g = df.groupby("end_digit")["hi"].mean().reset_index()
+    g.columns = ["末尾","高設定期待度"]
+    fig, ax = plt.subplots(figsize=(10,5))
+    colors = ["#e74c3c" if v>.3 else "#3498db" for v in g["高設定期待度"]]
+    sns.barplot(x="末尾", y="高設定期待度", data=g, palette=colors, ax=ax)
+    ax.set_title("台番号末尾ごとの高設定期待度", fontsize=14, fontweight="bold")
+    ax.axhline(.3, color="gray", ls="--", alpha=.5, label="基準ライン")
+    ax.legend(); ax.grid(axis="y", alpha=.3); fig.tight_layout()
+    st.pyplot(fig); plt.close(fig)
+    top = g.sort_values("高設定期待度", ascending=False).head(3)
+    cols = st.columns(3)
+    medals = ["🥇","🥈","🥉"]
+    for i, (_, r) in enumerate(top.iterrows()):
+        cols[i].metric(f"{medals[i]} 末尾{int(r['末尾'])}", f"{r['高設定期待度']:.3f}")
+
+def fig_cluster(df):
+    st.markdown('<div class="sec">🔗 並び・塊分析</div>', unsafe_allow_html=True)
+    g = df.groupby("mid")["hi"].mean().reset_index()
+    g.columns = ["台番号","高設定期待度"]
+    fig, ax = plt.subplots(figsize=(14,5))
+    sns.scatterplot(x="台番号", y="高設定期待度", data=g, s=100,
+                    color="#e74c3c", alpha=.7, zorder=5, ax=ax)
+    ax.plot(g["台番号"], g["高設定期待度"], color="#3498db", alpha=.4, lw=2)
+    ax.set_title("台番号順の高設定期待度", fontsize=14, fontweight="bold")
+    ax.grid(axis="y", ls="--", alpha=.5); plt.xticks(rotation=45)
+    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+    hot = g[g["高設定期待度"] > .4]
+    if len(hot):
+        st.success(f"🎯 高設定が期待できる台: {len(hot)} 台")
+        st.dataframe(hot.style.format({"高設定期待度":"{:.3f}"}), use_container_width=True)
+
+def fig_corner(df):
+    st.markdown('<div class="sec">🏢 角台 ＋ ヒートマップ</div>', unsafe_allow_html=True)
+    uids = sorted(df["mid"].unique())
+    islands, tmp = [], []
+    for i, m in enumerate(uids):
+        if i > 0 and m - uids[i-1] > 5:
+            if tmp: islands.append(tmp)
+            tmp = []
+        tmp.append(m)
+    if tmp: islands.append(tmp)
+    st.info(f"検出された島: **{len(islands)}**")
+    ms = df.groupby("mid")["hi"].mean()
+    ld = []
+    for isl in islands:
+        corners = {isl[0], isl[-1]}
+        for m in isl:
+            if m in ms:
+                ld.append(dict(id=m, type="角台" if m in corners else "中央台", score=ms[m]))
+    if not ld: return
+    ldf = pd.DataFrame(ld)
+
+    fig, ax = plt.subplots(figsize=(8,5))
+    sns.boxplot(x="type", y="score", data=ldf, palette="Set2",
+                hue="type", legend=False, ax=ax)
+    ax.set_title("角台 vs 中央台", fontsize=14, fontweight="bold")
+    ax.set_ylabel("高設定期待度"); ax.grid(axis="y", alpha=.3)
+    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+    sm = ldf.groupby("type")["score"].agg(["mean","median","std","count"])
+    sm.columns = ["平均","中央値","標準偏差","台数"]
+    st.dataframe(sm.style.format({"平均":"{:.3f}","中央値":"{:.3f}","標準偏差":"{:.3f}"}),
+                 use_container_width=True)
+
+    mx = max(len(isl) for isl in islands)
+    grid = np.full((len(islands), mx), np.nan)
+    ann  = np.full((len(islands), mx), "", dtype=object)
+    for r, isl in enumerate(islands):
+        for c, m in enumerate(isl):
+            if m in ms: grid[r,c] = ms[m]; ann[r,c] = str(m)
+    fig, ax = plt.subplots(figsize=(12, max(4, len(islands)*1.2)))
+    sns.heatmap(grid, annot=ann, fmt="", cmap="YlOrRd",
+                cbar_kws={"label":"高設定期待度"}, linewidths=.5, ax=ax)
+    ax.set_title("ホール配置ヒートマップ", fontsize=14, fontweight="bold")
+    ax.set_xlabel("島内の位置"); ax.set_ylabel("島番号")
+    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+def fig_overall(df):
+    st.markdown('<div class="sec">🎲 全台系・設定分布</div>', unsafe_allow_html=True)
+    da = df.groupby("date")["est"].mean().reset_index()
+    da.columns = ["日付","平均推定設定"]
+    st.dataframe(da.style.format({"平均推定設定":"{:.2f}"}), use_container_width=True)
+    fig, ax = plt.subplots(figsize=(8,5))
+    sc = df["est"].value_counts().sort_index()
+    sns.barplot(x=sc.index, y=sc.values, palette="viridis", ax=ax)
+    ax.set_title("推定設定の分布", fontsize=14, fontweight="bold")
+    ax.set_xlabel("推定設定"); ax.set_ylabel("台数")
+    ax.grid(axis="y", alpha=.3)
+    for i, v in enumerate(sc.values): ax.text(i, v+.5, str(v), ha="center", fontweight="bold")
+    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+    ratio = len(df[df["est"] >= 5]) / len(df) * 100
+    if ratio > 30:   st.success(f"✨ 高設定比率: **{ratio:.1f}%** — 多めです！")
+    elif ratio > 15: st.info(f"👍 高設定比率: **{ratio:.1f}%** — 標準的")
+    else:            st.warning(f"⚠️ 高設定比率: **{ratio:.1f}%** — 少なめ")
+
+# ═══════════════════════════════════════
+# サイドバー
+# ═══════════════════════════════════════
+with st.sidebar:
+    st.markdown("## 📝 データ入力")
+    st.caption("「日付, URL」を1行ずつ入力")
+    input_text = st.text_area(
+        "入力データ",
+        placeholder="2/7, https://min-repo.com/xxxxx\n2/14, https://min-repo.com/yyyyy",
+        height=200)
+    run = st.button("🚀 分析開始", use_container_width=True, type="primary")
+    st.markdown("---")
+    st.markdown("**入力形式:** `日付, URL`")
+    with st.expander("📋 対応機種一覧 (全8機種)"):
+        st.markdown("""
+- SアイムジャグラーEX
+- Sファンキージャグラー2
+- SマイジャグラーV
+- SハッピージャグラーV3
+- Sゴーゴージャグラー3
+- SジャグラーガールズSS
+- Sミスタージャグラー
+- Sウルトラミラクルジャグラー
+        """)
+
+# ═══════════════════════════════════════
+# ヘッダー
+# ═══════════════════════════════════════
+st.markdown("""
+<div class="hero">
+    <h1>🎰 ジャグラー ホール傾向分析ツール</h1>
+    <p>URLを入力 →「分析開始」→ 末尾・並び・ヒートマップを自動分析</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════
+# メイン処理
+# ═══════════════════════════════════════
+if run:
+    targets = parse_input(input_text)
+    if not targets:
+        st.error("❌ データを入力してください。形式: `日付, URL`")
+        st.stop()
+
+    st.info(f"📊 {len(targets)} 件のデータを取得します")
+    bar = st.progress(0)
+    status = st.empty()
+    all_data, errs = [], []
+
+    for i, (dt, url) in enumerate(targets):
+        status.markdown(f"🚀 **[{i+1}/{len(targets)}]** `{dt}` を取得中...")
+        bar.progress(i / len(targets))
+        data, err = scrape(dt, url)
+        if err:
+            errs.append(f"[{dt}] {err}")
+            st.warning(f"⚠️ [{dt}] {err}")
+        else:
+            all_data.extend(data)
+            st.success(f"✅ [{dt}] {len(data)} 台")
+
+    bar.progress(1.0)
+    status.empty()
+
+    if not all_data:
+        st.error("❌ データを取得できませんでした")
+        if errs:
+            with st.expander("エラー詳細"):
+                for e in errs: st.code(e)
+        st.stop()
+
+    # 設定推定 + データ加工
+    with st.spinner("📊 設定推定中..."):
+        all_data = estimate(all_data)
+        df = pd.DataFrame(all_data)
+        df["machine_id"] = df["machine_id"].astype(str)
+        df = df[df["machine_id"].str.replace("-","").str.isnumeric()].copy()
+        df["mid"] = df["machine_id"].str.replace("-","").astype(int)
+        df["end_digit"] = df["machine_id"].str[-1].astype(int)
+
+    # KPIカード
+    hi = len(df[df["est"] >= 5]) / len(df) * 100 if len(df) else 0
+    avg = df["est"].mean() if len(df) else 0
+    c1, c2, c3, c4 = st.columns(4)
+    for col, n, l in [(c1,str(len(df)),"分析台数"),(c2,str(len(targets)),"取得日数"),
+                       (c3,f"{avg:.1f}","平均推定設定"),(c4,f"{hi:.0f}%","高設定比率")]:
+        col.markdown(f'<div class="kpi"><div class="n">{n}</div><div class="l">{l}</div></div>',
+                     unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # タブ
+    t1,t2,t3,t4,t5 = st.tabs(["📍 末尾","🔗 並び","🏢 角台・ヒートマップ","🎲 全台系","📋 データ"])
+    with t1: fig_matsubi(df)
+    with t2: fig_cluster(df)
+    with t3: fig_corner(df)
+    with t4: fig_overall(df)
+    with t5:
+        show = {c: {"date":"日付","machine_id":"台番号","model":"機種","spin":"G数",
+                     "bb":"BB","rb":"RB","est":"推定設定","hi":"高設定期待度"}.get(c,c)
+                for c in ["date","machine_id","model","spin","bb","rb","est","hi"]
+                if c in df.columns}
+        st.dataframe(df[list(show.keys())].rename(columns=show), use_container_width=True, height=500)
+
+    csv = df.to_csv(index=False, encoding="utf-8-sig")
+    st.download_button("📥 CSVダウンロード", data=csv,
+                       file_name=f"analysis_{datetime.now():%Y%m%d_%H%M}.csv",
+                       mime="text/csv", use_container_width=True)
+else:
+    st.markdown("""
+    ### 👈 左のサイドバーから始めましょう
+    1. **日付とURLを入力**
+    2. **「🚀 分析開始」** をクリック
+    3. 結果がここに表示されます
+
+    ---
+    #### 💡 入力例
+    ```
+    2/7, https://min-repo.com/2906014/?kishu=マイジャグラーV
+    2/14, https://min-repo.com/2921029/?kishu=マイジャグラーV
+    ```
+    | 分析 | 内容 |
+    |------|------|
+    | 📍 末尾 | 末尾(0-9)ごとの高設定期待度 |
+    | 🔗 並び | 台番号順の高設定の偏り |
+    | 🏢 角台 | 角台vs中央台 + ヒートマップ |
+    | 🎲 全台系 | 設定分布・高設定比率 |
+    """)
