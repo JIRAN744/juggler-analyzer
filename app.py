@@ -133,26 +133,38 @@ def parse_input(text):
 # ═══════════════════════════════════════
 # スクレイピング (requests版 — Chrome不要!)
 # ═══════════════════════════════════════
-_HEADERS = {
+_SESSION = requests.Session()
+_SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36"
-}
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+})
 
 def scrape(date_label, url):
     model = _model(url)
     try:
-        r = requests.get(url, headers=_HEADERS, timeout=20)
+        r = _SESSION.get(url, timeout=30)
         r.raise_for_status()
+        r.encoding = r.apparent_encoding or "utf-8"
         soup = BeautifulSoup(r.text, "html.parser")
 
         tbl = None
-        for t in soup.find_all("table"):
+        all_tables = soup.find_all("table")
+        for t in all_tables:
             txt = t.text
-            if "BB" in txt and "RB" in txt and "台番" in txt:
+            if "BB" in txt and "RB" in txt:
                 tbl = t; break
         if not tbl:
-            return [], "テーブル未検出"
+            # デバッグ: ページの内容を確認
+            title = soup.title.text if soup.title else "N/A"
+            st.caption(f"🔍 Debug: tables={len(all_tables)}, size={len(r.text)}, "
+                       f"status={r.status_code}, title={title}")
+            return [], f"テーブル未検出 (tables={len(all_tables)}, page={title})"
 
         rows = tbl.find_all("tr")
         hdr = [c.text.strip() for c in rows[0].find_all(["th","td"])]
